@@ -85,7 +85,7 @@ export function ChatPanel() {
                   disabled={isRunning}
                   className="inline-flex items-center gap-2 rounded-md bg-slate-950 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60"
                 >
-                  Execute governance pipeline
+                  Recieve Governed Response
                   <ArrowRight className="h-4 w-4" />
                 </button>
                 <button

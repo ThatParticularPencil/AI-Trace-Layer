@@ -120,7 +120,7 @@ async function extractClaims(response: string): Promise<ClaimVerification[]> {
 
   const prompt = `Extract all factual claims from the following response. For each claim, determine if it's supported by evidence, and assign a confidence score from 0 to 1.
 
-Return a JSON array of objects with keys: claim, supported (boolean), confidence (number).
+Return a JSON object with a "claims" key containing an array of objects with keys: claim, supported (boolean), confidence (number).
 
 Response:
 ${response}`;
@@ -131,13 +131,15 @@ ${response}`;
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "Extract and evaluate claims from the response." },
+        { role: "system", content: "Extract factual claims from the response and return as JSON." },
         { role: "user", content: prompt }
       ]
     });
-    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "[]");
-    return Array.isArray(parsed) ? parsed : [];
-  } catch {
+    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}");
+    const claims = Array.isArray(parsed.claims) ? parsed.claims : Array.isArray(parsed) ? parsed : [];
+    return claims.filter((c: any) => c.claim && typeof c.confidence === 'number');
+  } catch (error) {
+    console.error("Claim extraction failed:", error);
     return [];
   }
 }
