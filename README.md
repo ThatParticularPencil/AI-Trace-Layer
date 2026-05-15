@@ -1,22 +1,13 @@
 # AI Trace Layer
+![https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%2010.51.13%E2%80%AFPM.png]
 
-AI Trace Layer is a lightweight runtime governance sandbox for LLM outputs, built to demonstrate how a safety and audit layer can monitor, verify, and enforce model responses in real time.
-
-## Why this project matters
+AI Trace Layer is a lightweight runtime governance sandbox for LLM outputs inspired by elloe AI, built to demonstrate how a safety and audit layer can monitor, verify, and enforce model responses in real time.
 
 This repository is designed for roles in LLM evaluation, red teaming, and compliance operations. It showcases:
 
 - A real-time audit and enforcement pipeline for generative AI responses
 - Structured claim extraction and verification
 - Dynamic source discovery, grounding, and decisioning
-- A front-end observability experience for both engineers and safety stakeholders
-
-It is especially relevant to internships focused on:
-
-- LLM red teaming and risk testing
-- Evaluation design and truth assessment
-- Policy-driven compliance for AI systems
-- Product safety flows and transparency tooling
 
 ## Core features
 
@@ -26,27 +17,7 @@ It is especially relevant to internships focused on:
 - **Audit trace**: every pipeline stage emits structured events, metadata, and decisions for review
 - **Enforcement actions**: responses may be allowed, warned, rewritten, or blocked based on grounding and risk
 
-## Architecture overview
-
-1. **Generation**
-   - The model answers freely but is guided to be cautious and evidence-aware.
-   - It is asked to list recommended sources at the end of the response.
-
-2. **Claim extraction**
-   - The generated text is parsed into discrete claims.
-   - Each claim includes support status and confidence.
-
-3. **Verification**
-   - Claims are verified against retrieved or discovered sources.
-   - The system scores grounding, identifies unsupported claims, and surfaces contradictions.
-
-4. **Policy enforcement**
-   - Verification results feed a risk-based policy decision.
-   - The response may be allowed, warned, rewritten, or blocked.
-
-5. **Audit and storage**
-   - Interaction history, trace events, policy decisions, and verification data are persisted.
-   - The UI surfaces trace events and source information.
+![https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%207.23.33%E2%80%AFPM.png]
 
 ## Getting started
 
@@ -94,24 +65,3 @@ npm run dev
 ```
 
 Then open the app in your browser and submit prompts to see the governance pipeline in action.
-
-## Why employers should care
-
-This repo is not just a demo: it is a practical example of how to move from passive retrieval-based output to active safety monitoring. It demonstrates:
-
-- **Adversarial thinking**: building layers that catch unsupported or risky model behavior
-- **Evaluation systems**: structuring claims and verification outputs for measurable decisions
-- **Product safety**: creating a transparent audit trail and policy enforcement path
-- **LLM interoperability**: supporting multiple provider backends through a single adapter
-
-## Relevant skills demonstrated
-
-- prompt engineering for safe, evidence-aware generation
-- AI evaluation and claim-based verification
-- observable, auditable runtime workflows
-- frontend safety UX for governance and review
-- backend persistence and trace event logging
-
-## Notes
-
-This app is intended to showcase a governance-first mindset: the model should think freely, but every output is monitored, scored, and controlled before reaching users.
