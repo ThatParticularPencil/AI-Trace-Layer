@@ -1,12 +1,11 @@
 import { detectDomain } from "@/app/lib/domain";
 import { getChatClient } from "@/app/lib/openai";
 import { prisma } from "@/app/lib/prisma";
-import { retrieveDocuments } from "@/app/lib/retrieval";
 import { clamp } from "@/app/lib/utils";
 import type {
+  ClaimVerification,
   Domain,
   GovernanceResult,
-  ClaimVerification,
   PolicyDecision,
   RetrievedDocument,
   RiskResult,
@@ -38,29 +37,21 @@ function sourceBlock(sources: RetrievedDocument[]) {
   return sources.map((doc) => `[${doc.title} | ${doc.source}]\n${doc.content}`).join("\n\n");
 }
 
-async function generateResponse(query: string, sources: RetrievedDocument[]) {
-  const prompt = `You are producing an evidence-aware answer that will be reviewed by a runtime governance layer before release.
-Use the supplied trusted context preferentially, but you may also use general medical knowledge where appropriate.
-Answer naturally and directly. Be cautious with medical advice, avoid overconfidence, and recommend qualified professional verification for patient-specific decisions.
-Cite claims when possible using the supplied source titles inline in parentheses.
+async function generateResponse(query: string) {
+  const prompt = `You are a medical knowledge assistant. Provide helpful, cautious, evidence-aware responses.
+Cite or recommend sources when possible.
+
+At the end of your response, list any sources you used or recommend, in the format: SOURCES: [URL or title]
 
 User question:
-${query}
-
-Trusted context:
-${sourceBlock(sources)}`;
+${query}`;
 
   const chat = getChatClient();
 
   if (!chat) {
-    const riskyWarfarin = query.toLowerCase().includes("warfarin") && query.toLowerCase().includes("ibuprofen");
     return {
       prompt,
-      rawResponse: riskyWarfarin
-        ? "Ibuprofen is generally safe to take with warfarin for short periods. Use the lowest effective dose and monitor for bruising."
-        : `The retrieved clinical sources indicate this depends on patient-specific risk factors. ${sources
-            .map((source) => `(${source.title})`)
-            .join(" ")} A qualified clinician should verify the safest next step.`,
+      rawResponse: `This question requires professional medical guidance. I recommend consulting qualified healthcare resources or a clinician for personalized advice.`,
       tokenCounts: { prompt: Math.round(prompt.length / 4), completion: 42 },
       model: "offline-demo-generator",
       provider: "offline"
@@ -69,9 +60,9 @@ ${sourceBlock(sources)}`;
 
   const completion = await chat.client.chat.completions.create({
     model: chat.model,
-    temperature: 0.35,
+    temperature: 0.2,
     messages: [
-      { role: "system", content: "You write concise, cautious, evidence-aware responses for a regulated workflow. A separate governance layer will verify your claims." },
+      { role: "system", content: "You write concise, cautious, source-grounded governed responses." },
       { role: "user", content: prompt }
     ]
   });
@@ -85,31 +76,51 @@ ${sourceBlock(sources)}`;
   };
 }
 
-function fallbackExtractClaims(response: string) {
-  return response
-    .split(/(?<=[.!?])\s+/)
-    .map((claim) => claim.trim())
-    .filter((claim) => claim.length > 20)
-    .slice(0, 8);
+function parseSources(response: string): string[] {
+  const sourcesMatch = response.match(/SOURCES:\s*(.+)/i);
+  if (!sourcesMatch) return [];
+  const sourcesText = sourcesMatch[1];
+  return sourcesText.split(',').map(s => s.trim()).filter(s => s);
 }
 
-async function extractClaims(response: string) {
+async function fetchSources(sourceList: string[]): Promise<RetrievedDocument[]> {
+  const fetched: RetrievedDocument[] = [];
+  for (const source of sourceList) {
+    if (source.startsWith('http')) {
+      try {
+        const response = await fetch(source);
+        const content = await response.text();
+        fetched.push({
+          id: `fetched-${Date.now()}-${fetched.length}`,
+          title: source,
+          source: 'Web',
+          content: content.slice(0, 2000), // Limit content
+          similarity: 1
+        });
+      } catch (error) {
+        console.error(`Failed to fetch ${source}:`, error);
+      }
+    } else {
+      // Title, create dummy
+      fetched.push({
+        id: `title-${Date.now()}-${fetched.length}`,
+        title: source,
+        source: 'AI-suggested',
+        content: `Content for ${source} (placeholder)`,
+        similarity: 1
+      });
+    }
+  }
+  return fetched;
+}
+
+async function extractClaims(response: string): Promise<ClaimVerification[]> {
   const chat = getChatClient();
-  const fallback = fallbackExtractClaims(response);
+  if (!chat) return [];
 
-  if (!chat) return fallback;
+  const prompt = `Extract all factual claims from the following response. For each claim, determine if it's supported by evidence, and assign a confidence score from 0 to 1.
 
-  const prompt = `Extract the factual and advisory claims from this model response.
-Return strict JSON only:
-{
-  "claims": ["claim 1", "claim 2"]
-}
-
-Rules:
-- Split compound medical assertions into separate claims.
-- Include safety claims, interaction claims, dosage claims, and recommendations.
-- Omit purely conversational text.
-- Keep each claim short and self-contained.
+Return a JSON array of objects with keys: claim, supported (boolean), confidence (number).
 
 Response:
 ${response}`;
@@ -120,124 +131,118 @@ ${response}`;
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "You extract auditable claims for an AI governance system." },
+        { role: "system", content: "Extract and evaluate claims from the response." },
         { role: "user", content: prompt }
       ]
     });
-    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}") as { claims?: unknown };
-    return Array.isArray(parsed.claims) ? parsed.claims.filter((claim): claim is string => typeof claim === "string").slice(0, 10) : fallback;
+    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "[]");
+    return Array.isArray(parsed) ? parsed : [];
   } catch {
-    return fallback;
+    return [];
   }
 }
 
-function fallbackVerifyClaims(claims: string[], sources: RetrievedDocument[]): ClaimVerification[] {
+function fallbackVerification(response: string, sources: RetrievedDocument[]): VerificationResult {
   const evidence = sources.map((source) => `${source.title} ${source.content}`.toLowerCase()).join(" ");
-  return claims.map((claim) => {
-    const lower = claim.toLowerCase();
-    const dangerousSafeClaim = lower.includes("safe") && lower.includes("warfarin") && lower.includes("ibuprofen");
-    const bleedingSupported = lower.includes("bleeding") && lower.includes("warfarin") && (lower.includes("ibuprofen") || lower.includes("nsaid"));
-    const consultSupported = /consult|ask|seek|professional|clinician|doctor|pharmacist/.test(lower);
-    const nsaidSupported = lower.includes("ibuprofen") && lower.includes("nsaid");
-    const supported = !dangerousSafeClaim && (bleedingSupported || consultSupported || nsaidSupported || lower.split(/\s+/).some((term) => term.length > 6 && evidence.includes(term)));
+  const unsupported: string[] = [];
+  const missing: string[] = [];
+  const contradictions: string[] = [];
+  const lower = response.toLowerCase();
 
-    return {
-      claim,
-      supported,
-      confidence: supported ? 0.82 : 0.24,
-      evidence: supported ? sources.slice(0, 2).map((source) => source.title) : [],
-      risk: lower.includes("warfarin") || lower.includes("dose") || lower.includes("safe") ? "high" : "medium",
-      notes: dangerousSafeClaim ? "Contradicts retrieved evidence describing increased bleeding risk." : undefined
-    };
-  });
+  if (lower.includes("generally safe") && evidence.includes("increased")) {
+    unsupported.push("The response asserts general safety despite trusted sources noting increased risk.");
+    contradictions.push("Trusted sources describe increased risk, but the response presents safety as likely.");
+  }
+  if (lower.includes("warfarin") && !lower.includes("bleeding")) {
+    missing.push("Bleeding risk is not mentioned for warfarin-related guidance.");
+  }
+  if (!response.includes("(")) {
+    unsupported.push("Response does not cite retrieved source titles inline.");
+  }
+
+  const penalty = unsupported.length * 0.15 + missing.length * 0.12 + contradictions.length * 0.13;
+  return {
+    grounding_score: clamp(0.86 - penalty),
+    unsupported_claims: unsupported,
+    missing_caveats: missing,
+    contradictions,
+    claims: []
+  };
 }
 
-async function verifyClaims(claims: string[], sources: RetrievedDocument[]): Promise<ClaimVerification[]> {
+async function verifyGrounding(claims: ClaimVerification[], sources: RetrievedDocument[]): Promise<VerificationResult> {
   const chat = getChatClient();
-  const fallback = fallbackVerifyClaims(claims, sources);
+  if (!chat) {
+    // Fallback: assume claims are verified based on sources
+    const evidence = sources.map((source) => `${source.title} ${source.content}`.toLowerCase()).join(" ");
+    const verifiedClaims = claims.map((claim) => ({
+      ...claim,
+      supported: evidence.includes(claim.claim.toLowerCase()),
+      confidence: evidence.includes(claim.claim.toLowerCase()) ? 0.8 : 0.2,
+      evidence: [],
+      risk: "medium" as const,
+      notes: "Fallback verification"
+    }));
+    const grounding_score = verifiedClaims.reduce((sum, c) => sum + c.confidence, 0) / verifiedClaims.length || 0.5;
+    return {
+      grounding_score,
+      unsupported_claims: verifiedClaims.filter(c => !c.supported).map(c => c.claim),
+      missing_caveats: [],
+      contradictions: [],
+      claims: verifiedClaims
+    };
+  }
 
-  if (!chat) return fallback;
+  const verifiedClaims: ClaimVerification[] = [];
+  for (const claim of claims) {
+    const prompt = `Verify this claim against the retrieved sources.
 
-  const prompt = `Verify each claim against the retrieved trusted sources.
-Return strict JSON only:
-{
-  "claims": [
-    {
-      "claim": "exact claim text",
-      "supported": true,
-      "confidence": 0.91,
-      "evidence": ["source title"],
-      "risk": "low",
-      "notes": "optional short explanation"
-    }
-  ]
-}
-
-Rules:
-- supported=true only when the retrieved sources directly support the claim or a conservative clinical recommendation.
-- If a claim uses general medical knowledge but is not supported by retrieved sources, mark supported=false unless it is clearly a conservative safety recommendation.
-- Mark contradictions and unsafe certainty in notes.
-- confidence must be 0..1.
-- risk is low, medium, or high.
+Claim: ${claim.claim}
 
 Retrieved sources:
 ${sourceBlock(sources)}
 
-Claims:
-${JSON.stringify(claims, null, 2)}`;
+Return JSON: {"supported": boolean, "confidence": number, "evidence": [string], "risk": "low"|"medium"|"high", "notes": string}`;
 
-  try {
-    const completion = await chat.client.chat.completions.create({
-      model: chat.model,
-      temperature: 0,
-      response_format: { type: "json_object" },
-      messages: [
-        { role: "system", content: "You are a claim-level evidence verifier for regulated AI output." },
-        { role: "user", content: prompt }
-      ]
-    });
-    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}") as { claims?: ClaimVerification[] };
-    if (!Array.isArray(parsed.claims)) return fallback;
-    return parsed.claims.map((item, index) => ({
-      claim: typeof item.claim === "string" ? item.claim : claims[index] ?? "Unparsed claim",
-      supported: Boolean(item.supported),
-      confidence: clamp(Number(item.confidence ?? 0)),
-      evidence: Array.isArray(item.evidence) ? item.evidence.filter((source): source is string => typeof source === "string") : [],
-      risk: item.risk === "high" || item.risk === "medium" || item.risk === "low" ? item.risk : "medium",
-      notes: typeof item.notes === "string" ? item.notes : undefined
-    }));
-  } catch {
-    return fallback;
-  }
-}
-
-function summarizeVerification(claims: ClaimVerification[], response: string): VerificationResult {
-  const unsupported = claims.filter((claim) => !claim.supported);
-  const contradictions = unsupported.filter((claim) => claim.notes?.toLowerCase().includes("contradict")).map((claim) => claim.claim);
-  const missing: string[] = [];
-
-  if (response.toLowerCase().includes("warfarin") && !response.toLowerCase().includes("bleeding")) {
-    missing.push("Bleeding risk not mentioned");
+    try {
+      const completion = await chat.client.chat.completions.create({
+        model: chat.model,
+        temperature: 0,
+        response_format: { type: "json_object" },
+        messages: [
+          { role: "system", content: "Verify the claim against sources." },
+          { role: "user", content: prompt }
+        ]
+      });
+      const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}");
+      verifiedClaims.push({
+        claim: claim.claim,
+        supported: Boolean(parsed.supported),
+        confidence: Number(parsed.confidence) || 0,
+        evidence: Array.isArray(parsed.evidence) ? parsed.evidence : [],
+        risk: (parsed.risk === "low" || parsed.risk === "medium" || parsed.risk === "high") ? parsed.risk : "medium",
+        notes: parsed.notes || ""
+      });
+    } catch {
+      verifiedClaims.push({
+        ...claim,
+        supported: false,
+        confidence: 0,
+        evidence: [],
+        risk: "high",
+        notes: "Verification failed"
+      });
+    }
   }
 
-  const claimScore = claims.length
-    ? claims.reduce((sum, claim) => sum + (claim.supported ? claim.confidence : Math.min(claim.confidence, 0.35)), 0) / claims.length
-    : 0.5;
-  const penalty = unsupported.filter((claim) => claim.risk === "high").length * 0.12 + contradictions.length * 0.18 + missing.length * 0.08;
-
+  const grounding_score = verifiedClaims.reduce((sum, c) => sum + c.confidence, 0) / verifiedClaims.length || 0;
   return {
-    grounding_score: clamp(claimScore - penalty),
-    unsupported_claims: unsupported.map((claim) => claim.claim),
-    missing_caveats: missing,
-    contradictions,
-    claims
+    grounding_score,
+    unsupported_claims: verifiedClaims.filter(c => !c.supported).map(c => c.claim),
+    missing_caveats: [],
+    contradictions: [],
+    claims: verifiedClaims
   };
-}
-
-async function verifyGrounding(response: string, sources: RetrievedDocument[]) {
-  const claims = await extractClaims(response);
-  const claimAssessments = await verifyClaims(claims, sources);
-  return summarizeVerification(claimAssessments, response);
 }
 
 function assessRisk(query: string, response: string, domain: Domain, verification: VerificationResult): RiskResult {
@@ -338,22 +343,10 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
 
   await push(trace("input", "success", "Inbound request captured", { query }));
 
-  const domain = detectDomain(query);
+  const domain = await detectDomain(query);
   await push(trace("input", domain === "general" ? "success" : "warning", `Domain detected: ${domain}`, { domain }));
 
-  const sources = retrieveDocuments(query);
-  await push(
-    trace("retrieval", "success", `Retrieved ${sources.length} trusted sources`, {
-      sources: sources.map((source) => ({
-        id: source.id,
-        title: source.title,
-        source: source.source,
-        similarity: Number(source.similarity.toFixed(3))
-      }))
-    })
-  );
-
-  const generation = await generateResponse(query, sources);
+  const generation = await generateResponse(query);
   await push(
     trace("generation", "success", "Initial model response generated", {
       model: generation.model,
@@ -363,35 +356,26 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
     })
   );
 
+  const answer = generation.rawResponse.split(/SOURCES:/i)[0].trim();
+  const suggestedSources = parseSources(generation.rawResponse);
+  const allSources = await fetchSources(suggestedSources);
+  await push(trace("retrieval", "success", `Discovered ${allSources.length} sources`, {
+    sources: allSources.map(s => ({ title: s.title, source: s.source }))
+  }));
+
+  // Update rawResponse to answer only
+  generation.rawResponse = answer;
+
   const claims = await extractClaims(generation.rawResponse);
-  await push(
-    trace("verification", "success", `Extracted ${claims.length} auditable claims`, {
-      claims
-    })
-  );
+  await push(trace("extraction", "success", `Extracted ${claims.length} claims`, { claims: claims.map(c => c.claim) }));
 
-  const claimAssessments = await verifyClaims(claims, sources);
-  await push(
-    trace("verification", claimAssessments.some((claim) => !claim.supported) ? "warning" : "success", "Claim-level evidence verification complete", {
-      claims: claimAssessments.map((claim) => ({
-        claim: claim.claim,
-        supported: claim.supported,
-        confidence: Number(claim.confidence.toFixed(2)),
-        evidence: claim.evidence,
-        risk: claim.risk,
-        notes: claim.notes
-      }))
-    })
-  );
-
-  const verification = summarizeVerification(claimAssessments, generation.rawResponse);
+  const verification = await verifyGrounding(claims, allSources.length > 0 ? allSources : claims.length > 0 ? [] : []);
   await push(
     trace("verification", verification.grounding_score < 0.65 ? "warning" : "success", `Grounding score: ${verification.grounding_score.toFixed(2)}`, {
       unsupportedClaims: verification.unsupported_claims,
       missingCaveats: verification.missing_caveats,
       contradictions: verification.contradictions,
-      supportedClaims: verification.claims.filter((claim) => claim.supported).length,
-      totalClaims: verification.claims.length
+      claims: verification.claims.map(c => ({ claim: c.claim, supported: c.supported, confidence: c.confidence }))
     })
   );
 
@@ -406,7 +390,7 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
   const policy = decidePolicy(verification, risk);
   await push(trace("policy", policy.action === "ALLOW" ? "success" : "warning", `Policy triggered: ${policy.action.toLowerCase()}`, policy));
 
-  const finalResponse = await intervene(query, generation.rawResponse, sources, verification, policy);
+  const finalResponse = await intervene(query, generation.rawResponse, allSources, verification, policy);
   await push(
     trace("intervention", policy.action === "ALLOW" ? "success" : "warning", policy.action === "ALLOW" ? "No intervention required" : "Runtime intervention applied", {
       action: policy.action
@@ -422,7 +406,7 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
       messages: {
         create: [
           { role: "user", content: query },
-          { role: "assistant", content: finalResponse, rawContent: generation.rawResponse }
+          { role: "assistant", content: finalResponse, rawContent: answer }
         ]
       },
       traceEvents: {
@@ -440,7 +424,6 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
           unsupportedClaims: JSON.stringify(verification.unsupported_claims),
           missingCaveats: JSON.stringify(verification.missing_caveats),
           contradictions: JSON.stringify(verification.contradictions),
-          claimAssessments: JSON.stringify(verification.claims),
           severity: risk.severity,
           hallucinationRisk: risk.hallucinationRisk
         }
@@ -460,7 +443,7 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
     domain,
     finalResponse,
     rawResponse: generation.rawResponse,
-    sources,
+    sources: allSources,
     traces,
     verification,
     risk,

@@ -4,6 +4,7 @@ export type TraceStage =
   | "input"
   | "retrieval"
   | "generation"
+  | "extraction"
   | "verification"
   | "policy"
   | "intervention"

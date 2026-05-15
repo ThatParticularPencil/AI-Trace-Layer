@@ -1,36 +1,25 @@
+import { getChatClient } from "@/app/lib/openai";
 import type { Domain } from "@/app/lib/types";
 
-const dictionaries: Record<Domain, string[]> = {
-  medical: [
-    "acetaminophen",
-    "antibiotic",
-    "blood",
-    "chest",
-    "clinic",
-    "dose",
-    "drug",
-    "heart",
-    "ibuprofen",
-    "insulin",
-    "medication",
-    "medicine",
-    "pain",
-    "pregnant",
-    "symptom",
-    "warfarin"
-  ],
-  financial: ["stock", "portfolio", "loan", "tax", "investment", "mortgage", "401k", "crypto"],
-  legal: ["contract", "lawsuit", "liable", "court", "tenant", "rights", "legal", "policy"],
-  general: []
-};
+export async function detectDomain(input: string): Promise<Domain> {
+  const chat = getChatClient();
+  if (!chat) return "general";
 
-export function detectDomain(input: string): Domain {
-  const text = input.toLowerCase();
-  const scored = (["medical", "financial", "legal"] as Domain[]).map((domain) => ({
-    domain,
-    score: dictionaries[domain].filter((keyword) => text.includes(keyword)).length
-  }));
-
-  scored.sort((a, b) => b.score - a.score);
-  return scored[0].score > 0 ? scored[0].domain : "general";
+  try {
+    const completion = await chat.client.chat.completions.create({
+      model: chat.model,
+      temperature: 0,
+      messages: [
+        { role: "system", content: "Classify the user's query into one of these domains: medical, financial, legal, or general. Return only the domain name in lowercase." },
+        { role: "user", content: input }
+      ]
+    });
+    const response = completion.choices[0]?.message.content?.trim().toLowerCase();
+    if (response === "medical" || response === "financial" || response === "legal" || response === "general") {
+      return response as Domain;
+    }
+  } catch (error) {
+    console.error("Domain detection failed:", error);
+  }
+  return "general";
 }
