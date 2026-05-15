@@ -47,6 +47,7 @@ model VerificationResult {
   unsupportedClaims String
   missingCaveats    String
   contradictions    String
+  claimAssessments  String       @default("[]")
   severity          String
   hallucinationRisk Float
   createdAt         DateTime     @default(now())

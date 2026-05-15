@@ -35,6 +35,16 @@ export type VerificationResult = {
   unsupported_claims: string[];
   missing_caveats: string[];
   contradictions: string[];
+  claims: ClaimVerification[];
+};
+
+export type ClaimVerification = {
+  claim: string;
+  supported: boolean;
+  confidence: number;
+  evidence: string[];
+  risk: "low" | "medium" | "high";
+  notes?: string;
 };
 
 export type RiskResult = {

@@ -178,6 +178,21 @@ export function ChatPanel() {
                   ))}
                 </dd>
               </div>
+              <div>
+                <dt className="text-xs uppercase tracking-wide text-slate-500">Claim review</dt>
+                <dd className="mt-2 space-y-2">
+                  {(result?.verification.claims ?? []).slice(0, 5).map((claim) => (
+                    <div key={claim.claim} className="rounded-md border border-slate-200 bg-slate-50 p-2">
+                      <div className="mb-1 flex items-center justify-between gap-2">
+                        <Badge variant={claim.supported ? "verified" : "rewritten"}>{claim.supported ? "supported" : "unverified"}</Badge>
+                        <span className="font-mono text-[11px] text-slate-500">{Math.round(claim.confidence * 100)}%</span>
+                      </div>
+                      <p className="text-xs leading-5 text-slate-700">{claim.claim}</p>
+                    </div>
+                  ))}
+                  {!result?.verification.claims.length ? <p className="text-slate-500">Claims will appear after verification.</p> : null}
+                </dd>
+              </div>
             </dl>
           </aside>
         </section>

@@ -1,11 +1,12 @@
 import { detectDomain } from "@/app/lib/domain";
-import { getOpenAI } from "@/app/lib/openai";
+import { getChatClient } from "@/app/lib/openai";
 import { prisma } from "@/app/lib/prisma";
 import { retrieveDocuments } from "@/app/lib/retrieval";
 import { clamp } from "@/app/lib/utils";
 import type {
   Domain,
   GovernanceResult,
+  ClaimVerification,
   PolicyDecision,
   RetrievedDocument,
   RiskResult,
@@ -38,9 +39,10 @@ function sourceBlock(sources: RetrievedDocument[]) {
 }
 
 async function generateResponse(query: string, sources: RetrievedDocument[]) {
-  const prompt = `You are producing a governed enterprise answer from retrieved context.
-Use only the supplied trusted context. Cite source titles inline in parentheses.
-If the context is insufficient, say so and recommend qualified professional verification.
+  const prompt = `You are producing an evidence-aware answer that will be reviewed by a runtime governance layer before release.
+Use the supplied trusted context preferentially, but you may also use general medical knowledge where appropriate.
+Answer naturally and directly. Be cautious with medical advice, avoid overconfidence, and recommend qualified professional verification for patient-specific decisions.
+Cite claims when possible using the supplied source titles inline in parentheses.
 
 User question:
 ${query}
@@ -48,9 +50,9 @@ ${query}
 Trusted context:
 ${sourceBlock(sources)}`;
 
-  const openai = getOpenAI();
+  const chat = getChatClient();
 
-  if (!openai) {
+  if (!chat) {
     const riskyWarfarin = query.toLowerCase().includes("warfarin") && query.toLowerCase().includes("ibuprofen");
     return {
       prompt,
@@ -60,15 +62,16 @@ ${sourceBlock(sources)}`;
             .map((source) => `(${source.title})`)
             .join(" ")} A qualified clinician should verify the safest next step.`,
       tokenCounts: { prompt: Math.round(prompt.length / 4), completion: 42 },
-      model: "offline-demo-generator"
+      model: "offline-demo-generator",
+      provider: "offline"
     };
   }
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
-    temperature: 0.2,
+  const completion = await chat.client.chat.completions.create({
+    model: chat.model,
+    temperature: 0.35,
     messages: [
-      { role: "system", content: "You write concise, cautious, source-grounded governed responses." },
+      { role: "system", content: "You write concise, cautious, evidence-aware responses for a regulated workflow. A separate governance layer will verify your claims." },
       { role: "user", content: prompt }
     ]
   });
@@ -77,71 +80,164 @@ ${sourceBlock(sources)}`;
     prompt,
     rawResponse: completion.choices[0]?.message.content ?? "",
     tokenCounts: completion.usage ?? null,
-    model: completion.model
+    model: completion.model,
+    provider: chat.provider
   };
 }
 
-function fallbackVerification(response: string, sources: RetrievedDocument[]): VerificationResult {
+function fallbackExtractClaims(response: string) {
+  return response
+    .split(/(?<=[.!?])\s+/)
+    .map((claim) => claim.trim())
+    .filter((claim) => claim.length > 20)
+    .slice(0, 8);
+}
+
+async function extractClaims(response: string) {
+  const chat = getChatClient();
+  const fallback = fallbackExtractClaims(response);
+
+  if (!chat) return fallback;
+
+  const prompt = `Extract the factual and advisory claims from this model response.
+Return strict JSON only:
+{
+  "claims": ["claim 1", "claim 2"]
+}
+
+Rules:
+- Split compound medical assertions into separate claims.
+- Include safety claims, interaction claims, dosage claims, and recommendations.
+- Omit purely conversational text.
+- Keep each claim short and self-contained.
+
+Response:
+${response}`;
+
+  try {
+    const completion = await chat.client.chat.completions.create({
+      model: chat.model,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: "You extract auditable claims for an AI governance system." },
+        { role: "user", content: prompt }
+      ]
+    });
+    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}") as { claims?: unknown };
+    return Array.isArray(parsed.claims) ? parsed.claims.filter((claim): claim is string => typeof claim === "string").slice(0, 10) : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function fallbackVerifyClaims(claims: string[], sources: RetrievedDocument[]): ClaimVerification[] {
   const evidence = sources.map((source) => `${source.title} ${source.content}`.toLowerCase()).join(" ");
-  const unsupported: string[] = [];
-  const missing: string[] = [];
-  const contradictions: string[] = [];
-  const lower = response.toLowerCase();
+  return claims.map((claim) => {
+    const lower = claim.toLowerCase();
+    const dangerousSafeClaim = lower.includes("safe") && lower.includes("warfarin") && lower.includes("ibuprofen");
+    const bleedingSupported = lower.includes("bleeding") && lower.includes("warfarin") && (lower.includes("ibuprofen") || lower.includes("nsaid"));
+    const consultSupported = /consult|ask|seek|professional|clinician|doctor|pharmacist/.test(lower);
+    const nsaidSupported = lower.includes("ibuprofen") && lower.includes("nsaid");
+    const supported = !dangerousSafeClaim && (bleedingSupported || consultSupported || nsaidSupported || lower.split(/\s+/).some((term) => term.length > 6 && evidence.includes(term)));
 
-  if (lower.includes("generally safe") && evidence.includes("increased")) {
-    unsupported.push("Ibuprofen is generally safe with warfarin");
-    contradictions.push("Trusted sources describe increased bleeding risk with NSAIDs and warfarin.");
-  }
-  if (lower.includes("warfarin") && !lower.includes("bleeding")) {
-    missing.push("Bleeding risk not mentioned");
-  }
-  if (!response.includes("(")) {
-    unsupported.push("Response does not cite retrieved source titles inline.");
-  }
-
-  const penalty = unsupported.length * 0.15 + missing.length * 0.12 + contradictions.length * 0.13;
-  return {
-    grounding_score: clamp(0.86 - penalty),
-    unsupported_claims: unsupported,
-    missing_caveats: missing,
-    contradictions
-  };
+    return {
+      claim,
+      supported,
+      confidence: supported ? 0.82 : 0.24,
+      evidence: supported ? sources.slice(0, 2).map((source) => source.title) : [],
+      risk: lower.includes("warfarin") || lower.includes("dose") || lower.includes("safe") ? "high" : "medium",
+      notes: dangerousSafeClaim ? "Contradicts retrieved evidence describing increased bleeding risk." : undefined
+    };
+  });
 }
 
-async function verifyGrounding(response: string, sources: RetrievedDocument[]) {
-  const openai = getOpenAI();
-  const prompt = `Assess whether the generated response is fully supported by the retrieved sources.
-Return strict JSON only with keys: grounding_score, unsupported_claims, missing_caveats, contradictions.
-grounding_score must be a number from 0 to 1.
+async function verifyClaims(claims: string[], sources: RetrievedDocument[]): Promise<ClaimVerification[]> {
+  const chat = getChatClient();
+  const fallback = fallbackVerifyClaims(claims, sources);
+
+  if (!chat) return fallback;
+
+  const prompt = `Verify each claim against the retrieved trusted sources.
+Return strict JSON only:
+{
+  "claims": [
+    {
+      "claim": "exact claim text",
+      "supported": true,
+      "confidence": 0.91,
+      "evidence": ["source title"],
+      "risk": "low",
+      "notes": "optional short explanation"
+    }
+  ]
+}
+
+Rules:
+- supported=true only when the retrieved sources directly support the claim or a conservative clinical recommendation.
+- If a claim uses general medical knowledge but is not supported by retrieved sources, mark supported=false unless it is clearly a conservative safety recommendation.
+- Mark contradictions and unsafe certainty in notes.
+- confidence must be 0..1.
+- risk is low, medium, or high.
 
 Retrieved sources:
 ${sourceBlock(sources)}
 
-Generated response:
-${response}`;
-
-  if (!openai) return fallbackVerification(response, sources);
+Claims:
+${JSON.stringify(claims, null, 2)}`;
 
   try {
-    const completion = await openai.chat.completions.create({
-      model: "gpt-4o-mini",
+    const completion = await chat.client.chat.completions.create({
+      model: chat.model,
       temperature: 0,
       response_format: { type: "json_object" },
       messages: [
-        { role: "system", content: "You are a strict grounding verifier for regulated AI responses." },
+        { role: "system", content: "You are a claim-level evidence verifier for regulated AI output." },
         { role: "user", content: prompt }
       ]
     });
-    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}") as VerificationResult;
-    return {
-      grounding_score: clamp(Number(parsed.grounding_score ?? 0)),
-      unsupported_claims: Array.isArray(parsed.unsupported_claims) ? parsed.unsupported_claims : [],
-      missing_caveats: Array.isArray(parsed.missing_caveats) ? parsed.missing_caveats : [],
-      contradictions: Array.isArray(parsed.contradictions) ? parsed.contradictions : []
-    };
+    const parsed = JSON.parse(completion.choices[0]?.message.content ?? "{}") as { claims?: ClaimVerification[] };
+    if (!Array.isArray(parsed.claims)) return fallback;
+    return parsed.claims.map((item, index) => ({
+      claim: typeof item.claim === "string" ? item.claim : claims[index] ?? "Unparsed claim",
+      supported: Boolean(item.supported),
+      confidence: clamp(Number(item.confidence ?? 0)),
+      evidence: Array.isArray(item.evidence) ? item.evidence.filter((source): source is string => typeof source === "string") : [],
+      risk: item.risk === "high" || item.risk === "medium" || item.risk === "low" ? item.risk : "medium",
+      notes: typeof item.notes === "string" ? item.notes : undefined
+    }));
   } catch {
-    return fallbackVerification(response, sources);
+    return fallback;
   }
+}
+
+function summarizeVerification(claims: ClaimVerification[], response: string): VerificationResult {
+  const unsupported = claims.filter((claim) => !claim.supported);
+  const contradictions = unsupported.filter((claim) => claim.notes?.toLowerCase().includes("contradict")).map((claim) => claim.claim);
+  const missing: string[] = [];
+
+  if (response.toLowerCase().includes("warfarin") && !response.toLowerCase().includes("bleeding")) {
+    missing.push("Bleeding risk not mentioned");
+  }
+
+  const claimScore = claims.length
+    ? claims.reduce((sum, claim) => sum + (claim.supported ? claim.confidence : Math.min(claim.confidence, 0.35)), 0) / claims.length
+    : 0.5;
+  const penalty = unsupported.filter((claim) => claim.risk === "high").length * 0.12 + contradictions.length * 0.18 + missing.length * 0.08;
+
+  return {
+    grounding_score: clamp(claimScore - penalty),
+    unsupported_claims: unsupported.map((claim) => claim.claim),
+    missing_caveats: missing,
+    contradictions,
+    claims
+  };
+}
+
+async function verifyGrounding(response: string, sources: RetrievedDocument[]) {
+  const claims = await extractClaims(response);
+  const claimAssessments = await verifyClaims(claims, sources);
+  return summarizeVerification(claimAssessments, response);
 }
 
 function assessRisk(query: string, response: string, domain: Domain, verification: VerificationResult): RiskResult {
@@ -200,7 +296,7 @@ async function intervene(query: string, failedResponse: string, sources: Retriev
 
   if (policy.action !== "REWRITE") return failedResponse;
 
-  const openai = getOpenAI();
+  const chat = getChatClient();
   const prompt = `Rewrite the failed response using ONLY supported claims from the trusted sources.
 Be cautious, mention uncertainty, recommend professional verification, and cite source titles inline.
 
@@ -216,12 +312,12 @@ ${failedResponse}
 Verifier findings:
 ${JSON.stringify(verification, null, 2)}`;
 
-  if (!openai) {
+  if (!chat) {
     return `The retrieved sources do not support treating ibuprofen as generally safe with warfarin. Warfarin can cause major bleeding, and FDA and Mayo Clinic materials note that NSAIDs such as ibuprofen can increase bleeding risk when used with blood thinners (Warfarin Medication Guide: Bleeding Risk; Ibuprofen Safety Considerations). Ask a clinician or pharmacist before taking ibuprofen with warfarin, and seek urgent help for unusual bleeding, black stools, severe headache, weakness, or other concerning symptoms.`;
   }
 
-  const completion = await openai.chat.completions.create({
-    model: "gpt-4o-mini",
+  const completion = await chat.client.chat.completions.create({
+    model: chat.model,
     temperature: 0.15,
     messages: [
       { role: "system", content: "You are a runtime intervention layer that rewrites unsafe LLM output." },
@@ -261,17 +357,41 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
   await push(
     trace("generation", "success", "Initial model response generated", {
       model: generation.model,
+      provider: generation.provider,
       tokenCounts: generation.tokenCounts,
       rawPreview: generation.rawResponse.slice(0, 180)
     })
   );
 
-  const verification = await verifyGrounding(generation.rawResponse, sources);
+  const claims = await extractClaims(generation.rawResponse);
+  await push(
+    trace("verification", "success", `Extracted ${claims.length} auditable claims`, {
+      claims
+    })
+  );
+
+  const claimAssessments = await verifyClaims(claims, sources);
+  await push(
+    trace("verification", claimAssessments.some((claim) => !claim.supported) ? "warning" : "success", "Claim-level evidence verification complete", {
+      claims: claimAssessments.map((claim) => ({
+        claim: claim.claim,
+        supported: claim.supported,
+        confidence: Number(claim.confidence.toFixed(2)),
+        evidence: claim.evidence,
+        risk: claim.risk,
+        notes: claim.notes
+      }))
+    })
+  );
+
+  const verification = summarizeVerification(claimAssessments, generation.rawResponse);
   await push(
     trace("verification", verification.grounding_score < 0.65 ? "warning" : "success", `Grounding score: ${verification.grounding_score.toFixed(2)}`, {
       unsupportedClaims: verification.unsupported_claims,
       missingCaveats: verification.missing_caveats,
-      contradictions: verification.contradictions
+      contradictions: verification.contradictions,
+      supportedClaims: verification.claims.filter((claim) => claim.supported).length,
+      totalClaims: verification.claims.length
     })
   );
 
@@ -320,6 +440,7 @@ export async function runGovernancePipeline(query: string, emit: Emit): Promise<
           unsupportedClaims: JSON.stringify(verification.unsupported_claims),
           missingCaveats: JSON.stringify(verification.missing_caveats),
           contradictions: JSON.stringify(verification.contradictions),
+          claimAssessments: JSON.stringify(verification.claims),
           severity: risk.severity,
           hallucinationRisk: risk.hallucinationRisk
         }
