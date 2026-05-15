@@ -31,11 +31,6 @@ export function ChatPanel() {
               <p className="text-xs text-slate-500">Runtime governance, verification, and enforcement for LLM outputs.</p>
             </div>
           </div>
-          <div className="hidden items-center gap-2 md:flex">
-            <Badge>SQLite audit history</Badge>
-            <Badge>local retrieval</Badge>
-            <Badge>policy firewall</Badge>
-          </div>
         </div>
       </header>
 
@@ -141,18 +136,34 @@ export function ChatPanel() {
                   <h3 className="text-sm font-semibold text-slate-950">Retrieved Sources</h3>
                 </div>
                 <div className="grid gap-3">
-                  {(result?.sources ?? []).map((source) => (
-                    <article key={source.id} className="rounded-md border border-slate-200 bg-white p-4">
-                      <div className="flex items-start justify-between gap-3">
-                        <div>
-                          <div className="text-sm font-medium text-slate-950">{source.title}</div>
-                          <div className="mt-1 text-xs text-slate-500">{source.source}</div>
+                  {(result?.sources ?? []).map((source) => {
+                    const sourceLink = /^(https?:\/\/)/i.test(source.title)
+                      ? source.title
+                      : /^(https?:\/\/)/i.test(source.source)
+                      ? source.source
+                      : undefined;
+
+                    return (
+                      <article key={source.id} className="rounded-md border border-slate-200 bg-white p-4">
+                        <div className="flex items-start justify-between gap-3">
+                          <div>
+                            <div className="text-sm font-medium text-slate-950">
+                              {sourceLink ? (
+                                <a href={sourceLink} target="_blank" rel="noopener noreferrer" className="hover:text-sky-600">
+                                  {source.title}
+                                </a>
+                              ) : (
+                                source.title
+                              )}
+                            </div>
+                            <div className="mt-1 text-xs text-slate-500">{source.source}</div>
+                          </div>
+                          <Badge>{formatPercent(source.similarity)}</Badge>
                         </div>
-                        <Badge>{formatPercent(source.similarity)}</Badge>
-                      </div>
-                      <p className="mt-3 text-xs leading-5 text-slate-600">{source.content}</p>
-                    </article>
-                  ))}
+                        <p className="mt-3 text-xs leading-5 text-slate-600">{source.content}</p>
+                      </article>
+                    );
+                  })}
                   {!result?.sources.length ? <div className="rounded-md border border-dashed border-slate-300 p-4 text-sm text-slate-500">No sources retrieved yet.</div> : null}
                 </div>
               </section>

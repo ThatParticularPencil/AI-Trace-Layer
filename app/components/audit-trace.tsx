@@ -72,7 +72,7 @@ export function AuditTrace({ events, isRunning }: { events: TraceEvent[]; isRunn
         <div className="flex items-center justify-between">
           <div>
             <h2 className="text-sm font-semibold text-slate-950">Live Audit Trace</h2>
-            <p className="mt-1 text-xs text-slate-500">Structured events emitted by the runtime governance pipeline.</p>
+            <p className="mt-1 text-xs text-slate-500">Review each governance stage, metadata, and runtime enforcement decision.</p>
           </div>
           <span className={cn("h-2.5 w-2.5 rounded-full", isRunning ? "bg-amber-500" : events.length ? "bg-emerald-500" : "bg-slate-300")} />
         </div>
