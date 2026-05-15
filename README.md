@@ -1,5 +1,5 @@
 # AI Trace Layer
-![https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%2010.51.13%E2%80%AFPM.png]
+![front page](https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%2010.51.13%E2%80%AFPM.png)
 
 AI Trace Layer is a lightweight runtime governance sandbox for LLM outputs inspired by elloe AI, built to demonstrate how a safety and audit layer can monitor, verify, and enforce model responses in real time.
 
@@ -17,7 +17,7 @@ This repository is designed for roles in LLM evaluation, red teaming, and compli
 - **Audit trace**: every pipeline stage emits structured events, metadata, and decisions for review
 - **Enforcement actions**: responses may be allowed, warned, rewritten, or blocked based on grounding and risk
 
-![https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%207.23.33%E2%80%AFPM.png]
+![bottom half](https://github.com/ThatParticularPencil/AI-Trace-Layer/blob/main/Screenshot%202026-05-14%20at%207.23.33%E2%80%AFPM.png)
 
 ## Getting started
 
